@@ -4,8 +4,13 @@ Use this procedure only to install the already-bootstrapped workflow into the
 current project. Do not manually copy or merge workflow files, and do not
 modify or reinstall anything under `~/.codex/`.
 
-Python 3.11 or newer is required. On Windows, use the equivalent `py -3.11`
-invocation and native paths.
+Codex 0.147.0 or newer and Python 3.11 or newer are required. On Windows, use
+the equivalent `py -3.11` invocation and native paths. Before any mutation,
+run and require `"compatible": true`:
+
+```text
+python3 ~/.codex/codex_workflow/workflow.py check-compatibility --json
+```
 
 ## Existing project installation
 
@@ -39,10 +44,10 @@ The command reads templates from the existing user-level bootstrap but changes
 only the current project. It creates the project `AGENTS.md`, missing files in
 the `agent_docs/` documentation scaffold, the hidden personalization and state
 files, and other project-level assets. It imports an existing unrecognized
-project `AGENTS.md` verbatim into the project-local marker region and adds the
-workflow-owned project paths to `.gitignore` without changing unrelated rules.
+project `AGENTS.md` verbatim into the project-local marker region and adds a
+marked workflow-owned block to `.gitignore` without changing unrelated rules.
 
-It does not rewrite the shared user-level runtime, configuration, user
+It does not rewrite the shared user-level runtime, fixed definitions, user
 instructions, source backup, or worker TOMLs under `~/.codex/`. Stop and report
 the error if the initial user-level bootstrap is missing.
 

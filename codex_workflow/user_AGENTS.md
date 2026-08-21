@@ -1,5 +1,5 @@
 <!-- codex-workflow-user-id: viettran-edgeAI/codex_workflow -->
-<!-- codex-workflow-version: 1.1.3 -->
+<!-- codex-workflow-version: 1.1.4 -->
 <!-- codex-workflow-user-managed-start -->
 # AGENTS.md
 
@@ -32,9 +32,6 @@ exactly.
 
 - codex_workflow --disable_auto_update
   Guide: ~/.codex/codex_workflow/disable_auto_update.md (legacy alias).
-
-- codex_workflow --configure
-  Guide: ~/.codex/codex_workflow/configuration_guide.md.
 
 - codex_workflow --personal
   Guide: ~/.codex/codex_workflow/personalization_guide.md.

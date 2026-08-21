@@ -25,16 +25,44 @@ GITIGNORE_ENTRIES = (
     ".codex_workflow_hidden_resources/",
     "AGENTS.md",
 )
+GITIGNORE_MANAGED_START = "# codex-workflow-managed-start"
+GITIGNORE_MANAGED_END = "# codex-workflow-managed-end"
 BOOTSTRAP_DOC_MARKER = "<!-- codex-workflow-bootstrap-template -->"
 
 
-def _plan_gitignore(project: ProjectPaths) -> Mutation | None:
-    """Add the project files owned by the workflow to ``.gitignore``.
+def _gitignore_block(entries: tuple[str, ...] = GITIGNORE_ENTRIES) -> str:
+    return "\n".join((GITIGNORE_MANAGED_START, *entries, GITIGNORE_MANAGED_END))
 
-    Existing entries and unrelated rules are preserved verbatim. Matching is
-    done on stripped, non-comment lines so a repeated install remains a
-    no-op even when the file uses blank lines or indentation around rules.
-    """
+
+def _gitignore_managed_range(lines: list[str]) -> tuple[int, int] | None:
+    starts = [index for index, line in enumerate(lines) if line == GITIGNORE_MANAGED_START]
+    ends = [index for index, line in enumerate(lines) if line == GITIGNORE_MANAGED_END]
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise ValidationError("project .gitignore has malformed workflow-managed markers")
+    return starts[0], ends[0]
+
+
+def _append_gitignore_block(current: str, entries: tuple[str, ...]) -> str:
+    prefix = current.rstrip("\r\n")
+    if prefix:
+        prefix += "\n\n"
+    return prefix + _gitignore_block(entries) + "\n"
+
+
+def _remove_unmarked_gitignore_entries(current: str) -> str:
+    retained = [
+        line
+        for line in current.splitlines()
+        if not (line.strip() in GITIGNORE_ENTRIES and not line.lstrip().startswith("#"))
+    ]
+    rendered = "\n".join(retained).rstrip()
+    return f"{rendered}\n" if rendered else ""
+
+
+def _plan_gitignore(project: ProjectPaths) -> Mutation | None:
+    """Add a removable, workflow-owned block to ``.gitignore``."""
 
     path = project.gitignore
     if path.is_symlink() or (path.exists() and not path.is_file()):
@@ -43,20 +71,74 @@ def _plan_gitignore(project: ProjectPaths) -> Mutation | None:
         )
 
     current = path.read_text(encoding="utf-8") if path.is_file() else ""
+    lines = current.splitlines()
+    managed_range = _gitignore_managed_range(lines)
+    if managed_range is not None:
+        start, end = managed_range
+        managed_entries = lines[start + 1 : end]
+        if (
+            any(entry not in GITIGNORE_ENTRIES for entry in managed_entries)
+            or len(managed_entries) != len(set(managed_entries))
+        ):
+            raise ValidationError("project .gitignore has invalid workflow-managed rules")
+        existing = {
+            line.strip()
+            for line in lines
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        missing = [entry for entry in GITIGNORE_ENTRIES if entry not in existing]
+        if not missing:
+            return None
+        rendered_lines = lines[:end] + missing + lines[end:]
+        rendered = "\n".join(rendered_lines).rstrip() + "\n"
+        return text_mutation(path, rendered)
+
     existing = {
         line.strip()
-        for line in current.splitlines()
+        for line in lines
         if line.strip() and not line.lstrip().startswith("#")
     }
+    # Legacy releases wrote all three entries without markers. A recognized
+    # workflow project containing that complete set can safely adopt it into a
+    # removable block during its next install/update operation.
+    if set(GITIGNORE_ENTRIES).issubset(existing):
+        return text_mutation(
+            path,
+            _append_gitignore_block(
+                _remove_unmarked_gitignore_entries(current), GITIGNORE_ENTRIES
+            ),
+        )
     missing = [entry for entry in GITIGNORE_ENTRIES if entry not in existing]
     if not missing:
         return None
+    return text_mutation(path, _append_gitignore_block(current, tuple(missing)))
 
-    rendered = current
-    if rendered and not rendered.endswith(("\n", "\r")):
-        rendered += "\n"
-    rendered += "\n".join(missing) + "\n"
-    return text_mutation(path, rendered)
+
+def _plan_gitignore_remove(project: ProjectPaths) -> Mutation | None:
+    """Remove only the ignore rules that this workflow can prove it owns."""
+
+    path = project.gitignore
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValidationError(f"project .gitignore path is not a regular file: {path}")
+    if not path.is_file():
+        return None
+    current = path.read_text(encoding="utf-8")
+    lines = current.splitlines()
+    managed_range = _gitignore_managed_range(lines)
+    if managed_range is not None:
+        start, end = managed_range
+        retained = lines[:start] + lines[end + 1 :]
+        rendered = "\n".join(retained).rstrip()
+        rendered = f"{rendered}\n" if rendered else ""
+        return text_mutation(path, rendered)
+    existing = {
+        line.strip()
+        for line in lines
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if set(GITIGNORE_ENTRIES).issubset(existing):
+        return text_mutation(path, _remove_unmarked_gitignore_entries(current))
+    return None
 
 
 def _plan_source_cleanup(project: ProjectPaths) -> tuple[list[Mutation], list[Path]]:
@@ -345,8 +427,24 @@ def plan_project_remove(
         current = entry.read_text(encoding="utf-8")
         if PROJECT_ID not in current:
             raise ValidationError(f"refusing to remove unrecognized project entry point: {entry}")
-        mutations.append(Mutation(entry, None))
-        warnings.append(f"{entry} will be permanently deleted")
+        if PROJECT_LOCAL.start not in current or PROJECT_LOCAL.end not in current:
+            raise ValidationError(
+                "refusing to remove workflow entry without recoverable project-local instructions"
+            )
+        local_instructions = extract(current, PROJECT_LOCAL)
+        if local_instructions:
+            mutations.append(text_mutation(project.active, local_instructions.rstrip() + "\n"))
+            warnings.append(
+                f"workflow wrapper will be removed and project-local instructions restored to {project.active}"
+            )
+        else:
+            mutations.append(Mutation(entry, None))
+            warnings.append(f"{entry} will be permanently deleted because it has no project-local instructions")
+
+    gitignore_mutation = _plan_gitignore_remove(project)
+    if gitignore_mutation is not None:
+        mutations.append(gitignore_mutation)
+        warnings.append("workflow-owned .gitignore rules will be removed")
 
     hidden_dir = project.workflow_dir
     if hidden_dir.is_symlink() or (

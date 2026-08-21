@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._toml import tomllib
-from .config import load_config, render_heavy_route
 from .errors import ValidationError
 from .markers import (
     AUTO_CHECK_UPDATE_PLACEHOLDER,
@@ -23,6 +22,17 @@ USER_ID = "<!-- codex-workflow-user-id: viettran-edgeAI/codex_workflow -->"
 WORKER_MARKER = re.compile(r"^# codex-workflow-worker: ([A-Za-z0-9_-]+)$", re.MULTILINE)
 PROJECT_STATE = "state.json"
 USER_STATE = "install_state.json"
+BUILTIN_WORKERS = frozenset(
+    {
+        "default_executor",
+        "senior_executor",
+        "tester",
+        "doc-writer",
+        "companion",
+        "investigator",
+        "closure_steward",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -87,11 +97,11 @@ class PackageLayout:
                 )
             required = [
                 "workflow.py",
-                "resources/workflow_config.default.json",
                 "heavy_route.md",
                 "medium_route.md",
-                "explorer_companion.md",
-                "end_of_session.md",
+                "companion.md",
+                "investigation_team.md",
+                "closure_steward.md",
                 "install.md",
                 "bootstrap.md",
                 "update.md",
@@ -101,18 +111,16 @@ class PackageLayout:
                 "enable_auto_update.md",
                 "disable_auto_update.md",
                 "disable_auto_check_update.md",
-                "configuration_guide.md",
                 "personalization_guide.md",
                 "enable.md",
                 "disable.md",
                 "runtime/__init__.py",
                 "runtime/_toml.py",
                 "runtime/backup.py",
-                "runtime/config.py",
                 "runtime/layout.py",
                 "runtime/lifecycle.py",
                 "runtime/markers.py",
-                "runtime/migrations.py",
+                "runtime/platform_settings.py",
                 "runtime/personalization.py",
                 "runtime/plan.py",
                 "runtime/project_ops.py",
@@ -149,6 +157,12 @@ class PackageLayout:
         templates = self.worker_names
         if not templates:
             raise ValidationError("package has no worker templates")
+        if not allow_legacy and templates != BUILTIN_WORKERS:
+            raise ValidationError(
+                "package worker set is incomplete or unsupported; "
+                f"missing={sorted(BUILTIN_WORKERS - templates)}, "
+                f"unexpected={sorted(templates - BUILTIN_WORKERS)}"
+            )
         for worker in templates:
             text = (self.agent_templates / f"{worker}.toml").read_text(encoding="utf-8")
             match = WORKER_MARKER.search(text)
@@ -159,12 +173,6 @@ class PackageLayout:
             except tomllib.TOMLDecodeError as error:
                 raise ValidationError(f"invalid worker TOML {worker}: {error}") from error
         if not allow_legacy:
-            config = load_config(
-                self.default_config, templates=self.agent_templates
-            )
-            render_heavy_route(
-                (self.root / "heavy_route.md").read_text(encoding="utf-8"), config
-            )
             materialize_personalization(
                 (self.root / "resources" / "personalization.md").read_text(
                     encoding="utf-8"
@@ -181,10 +189,6 @@ class PackageLayout:
     @property
     def worker_names(self) -> set[str]:
         return {path.stem for path in self.agent_templates.glob("*.toml") if path.is_file()}
-
-    @property
-    def default_config(self) -> Path:
-        return self.root / "resources" / "workflow_config.default.json"
 
     @property
     def default_personalization(self) -> Path:

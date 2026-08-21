@@ -13,6 +13,7 @@ import hashlib
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from functools import total_ordering
@@ -28,6 +29,17 @@ IDENTIFIER = re.compile(r"^[0-9A-Za-z-]+$")
 USER_ID_MARKER = "<!-- codex-workflow-user-id: viettran-edgeAI/codex_workflow -->"
 USER_MANAGED_START = "<!-- codex-workflow-user-managed-start -->"
 USER_MANAGED_END = "<!-- codex-workflow-user-managed-end -->"
+BUILTIN_WORKERS = frozenset(
+    {
+        "default_executor",
+        "senior_executor",
+        "tester",
+        "doc-writer",
+        "companion",
+        "investigator",
+        "closure_steward",
+    }
+)
 
 
 class ReleaseError(ValueError):
@@ -283,18 +295,18 @@ def _verify_member_names(names: Iterable[str]) -> list[str]:
         f"{PACKAGE_DIR_NAME}/enable_auto_update.md",
         f"{PACKAGE_DIR_NAME}/disable_auto_update.md",
         f"{PACKAGE_DIR_NAME}/disable_auto_check_update.md",
-        f"{PACKAGE_DIR_NAME}/end_of_session.md",
-        f"{PACKAGE_DIR_NAME}/agents/end_of_session.toml",
+        f"{PACKAGE_DIR_NAME}/companion.md",
+        f"{PACKAGE_DIR_NAME}/closure_steward.md",
+        f"{PACKAGE_DIR_NAME}/investigation_team.md",
         f"{PACKAGE_DIR_NAME}/workflow.py",
         f"{PACKAGE_DIR_NAME}/runtime/__init__.py",
         f"{PACKAGE_DIR_NAME}/runtime/_toml.py",
         f"{PACKAGE_DIR_NAME}/runtime/backup.py",
-        f"{PACKAGE_DIR_NAME}/runtime/config.py",
         f"{PACKAGE_DIR_NAME}/runtime/errors.py",
         f"{PACKAGE_DIR_NAME}/runtime/layout.py",
         f"{PACKAGE_DIR_NAME}/runtime/lifecycle.py",
         f"{PACKAGE_DIR_NAME}/runtime/markers.py",
-        f"{PACKAGE_DIR_NAME}/runtime/migrations.py",
+        f"{PACKAGE_DIR_NAME}/runtime/platform_settings.py",
         f"{PACKAGE_DIR_NAME}/runtime/personalization.py",
         f"{PACKAGE_DIR_NAME}/runtime/plan.py",
         f"{PACKAGE_DIR_NAME}/runtime/project_ops.py",
@@ -303,18 +315,50 @@ def _verify_member_names(names: Iterable[str]) -> list[str]:
         f"{PACKAGE_DIR_NAME}/runtime/transaction.py",
         f"{PACKAGE_DIR_NAME}/resources/personalization.md",
         f"{PACKAGE_DIR_NAME}/resources/auto_check_update.md",
-        f"{PACKAGE_DIR_NAME}/resources/workflow_config.default.json",
     }
+    required.update(
+        f"{PACKAGE_DIR_NAME}/agents/{worker}.toml" for worker in BUILTIN_WORKERS
+    )
     missing = sorted(required.difference(normalized))
     if missing:
         raise ReleaseError("archive is missing: " + ", ".join(missing))
+    retired_workers = {
+        f"{PACKAGE_DIR_NAME}/agents/executor_luna.toml",
+        f"{PACKAGE_DIR_NAME}/agents/executor_sol.toml",
+        f"{PACKAGE_DIR_NAME}/agents/executor_terra.toml",
+        f"{PACKAGE_DIR_NAME}/agents/explorer.toml",
+        f"{PACKAGE_DIR_NAME}/agents/end_of_session.toml",
+    }
+    present_retired = sorted(retired_workers.intersection(normalized))
+    if present_retired:
+        raise ReleaseError(
+            "archive contains retired worker roles: " + ", ".join(present_retired)
+        )
+    expected_workers = {
+        f"{PACKAGE_DIR_NAME}/agents/{worker}.toml" for worker in BUILTIN_WORKERS
+    }
+    present_workers = {
+        name
+        for name in normalized
+        if name.startswith(f"{PACKAGE_DIR_NAME}/agents/")
+        and name.endswith(".toml")
+    }
+    unexpected_workers = sorted(present_workers - expected_workers)
+    if unexpected_workers:
+        raise ReleaseError(
+            "archive contains unsupported worker roles: "
+            + ", ".join(unexpected_workers)
+        )
     return normalized
 
 
 def verify_archive(archive_path: Path, expected_version: SemVer | None = None) -> str:
     if archive_path.suffix == ".zip":
         with zipfile.ZipFile(archive_path) as archive:
-            _verify_member_names(archive.namelist())
+            members = archive.infolist()
+            names = _verify_member_names(member.filename for member in members)
+            if len(names) != len(set(names)):
+                raise ReleaseError("archive contains duplicate members")
             version_text = archive.read(f"{PACKAGE_DIR_NAME}/{VERSION_FILE}").decode(
                 "utf-8"
             ).strip()
@@ -322,6 +366,10 @@ def verify_archive(archive_path: Path, expected_version: SemVer | None = None) -
                 "utf-8"
             )
             _validate_user_agents_text(user_agents, version_text)
+            with tempfile.TemporaryDirectory(prefix="codex-workflow-verify-") as temporary:
+                extraction = Path(temporary)
+                archive.extractall(extraction)
+                _validate_runtime(extraction / PACKAGE_DIR_NAME)
     else:
         raise ReleaseError(f"unsupported archive type: {archive_path}")
 
@@ -378,7 +426,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir", type=Path, default=repository_root() / "dist", help="asset directory"
     )
-    parser.add_argument("--release-tag", help="validate a release tag such as v1.1.2")
+    parser.add_argument("--release-tag", help="validate a release tag such as v1.1.4")
     parser.add_argument("--version", help="validate an expected package version")
     parser.add_argument(
         "--verify",

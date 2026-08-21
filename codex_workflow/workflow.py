@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,9 +20,8 @@ from pathlib import Path
 if sys.version_info < (3, 11):
     raise SystemExit("codex_workflow requires Python 3.11 or newer")
 
-from runtime.config import load_config
 from runtime.errors import WorkflowError
-from runtime.layout import PROJECT_ID
+from runtime.layout import PROJECT_ID, USER_STATE
 from runtime.lifecycle import (
     OperationPlan,
     PackageLayout,
@@ -29,7 +29,6 @@ from runtime.lifecycle import (
     RuntimePaths,
     plan_bootstrap,
     plan_auto_check_update_setting,
-    plan_configure,
     plan_enable,
     plan_personalize,
     plan_project_install,
@@ -42,6 +41,15 @@ from runtime.release import (
     select_latest,
     select_releases,
     summarize_release_notes,
+)
+
+
+MIN_CODEX_VERSION = "0.147.0"
+_CODEX_VERSION = re.compile(
+    r"(?<![0-9A-Za-z])v?"
+    r"((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)"
 )
 
 
@@ -106,19 +114,6 @@ def parse_args() -> argparse.Namespace:
         command = commands.add_parser(name)
         _add_common(command, project=False)
 
-    configure = commands.add_parser("configure")
-    _add_common(configure, project=False)
-    configure.add_argument("--default-executor", choices=["executor_luna", "executor_terra"])
-    configure.add_argument("--reasoning-effort", choices=["high", "xhigh", "max"])
-    configure.add_argument("--max-workers", type=int)
-    configure.add_argument("--max-sol", type=int)
-    configure.add_argument("--report-size", type=int)
-    configure.add_argument(
-        "--auto-check-update",
-        choices=["enabled", "disabled"],
-        help=argparse.SUPPRESS,
-    )
-
     personalize = commands.add_parser("personalize")
     _add_common(personalize)
     personalize.add_argument("--resource", type=Path, required=True)
@@ -130,6 +125,12 @@ def parse_args() -> argparse.Namespace:
     validate = commands.add_parser("validate")
     _add_common(validate, project=False)
     validate.add_argument("--package-root", type=Path, default=Path(__file__).resolve().parent)
+
+    compatibility = commands.add_parser(
+        "check-compatibility",
+        help="verify that the installed Codex release supports this workflow",
+    )
+    _add_common(compatibility, project=False)
     return parser.parse_args()
 
 
@@ -144,6 +145,45 @@ def _emit(value: dict[str, object], *, compact: bool) -> None:
         print(json.dumps(value, separators=(",", ":"), sort_keys=True))
     else:
         print(json.dumps(value, indent=2, sort_keys=True))
+
+
+def _require_compatible_codex() -> dict[str, object]:
+    try:
+        completed = subprocess.run(
+            ["codex", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise WorkflowError(
+            f"cannot determine the installed Codex version: {error}"
+        ) from error
+    output = "\n".join(
+        value.strip() for value in (completed.stdout, completed.stderr) if value.strip()
+    )
+    if completed.returncode:
+        raise WorkflowError(
+            "cannot determine the installed Codex version"
+            + (f": {output}" if output else "")
+        )
+    match = _CODEX_VERSION.search(output)
+    if match is None:
+        raise WorkflowError(f"cannot parse the installed Codex version from: {output!r}")
+    detected_text = match.group(1)
+    detected = parse_semver(detected_text)
+    minimum = parse_semver(MIN_CODEX_VERSION)
+    if detected < minimum:
+        raise WorkflowError(
+            f"Codex {detected_text} is incompatible; Codex {MIN_CODEX_VERSION} or "
+            "newer is required for this workflow's tested subagent support"
+        )
+    return {
+        "compatible": True,
+        "codex_version": detected_text,
+        "minimum_codex_version": MIN_CODEX_VERSION,
+    }
 
 
 def _finish(plan: OperationPlan, args: argparse.Namespace) -> int:
@@ -163,14 +203,63 @@ def _project_workflow_entry(project: ProjectPaths) -> Path | None:
     return None
 
 
-def _delegate_update(incoming: PackageLayout, args: argparse.Namespace) -> int:
+def _package_root(path: Path) -> Path:
+    """Resolve a package path without applying a version-specific schema."""
+
+    root = path.expanduser().resolve()
+    if not (root / "VERSION").is_file():
+        nested = root / "codex_workflow"
+        if (nested / "VERSION").is_file():
+            root = nested
+    return root
+
+
+def _package_version(root: Path) -> object:
+    """Read the minimal update-ordering metadata without applying a package schema."""
+
+    version_path = root / "VERSION"
+    try:
+        lines = version_path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise WorkflowError(f"cannot read incoming package VERSION: {error}") from error
+    if len(lines) != 1 or not lines[0]:
+        raise WorkflowError("incoming package VERSION must contain exactly one non-empty line")
+    try:
+        return parse_semver(lines[0])
+    except Exception as error:
+        raise WorkflowError(f"incoming package VERSION is invalid: {lines[0]!r}") from error
+
+
+def _require_newer_update(
+    incoming_root: Path, runtime: RuntimePaths, *, allow_downgrade: bool
+) -> None:
+    """Reject equal or unintended downgrade packages before handing them off."""
+
+    incoming = _package_version(incoming_root)
+    try:
+        installed_text = (runtime.runtime / "VERSION").read_text(encoding="utf-8").strip()
+        installed = parse_semver(installed_text)
+    except OSError as error:
+        raise WorkflowError(f"cannot read installed workflow VERSION: {error}") from error
+    except Exception as error:
+        raise WorkflowError("installed workflow VERSION is invalid") from error
+    if incoming == installed:
+        raise WorkflowError("incoming version matches the installed version; select a newer release")
+    if incoming < installed and not allow_downgrade:
+        raise WorkflowError("incoming version is older; pass --allow-downgrade after approval")
+
+
+def _delegate_update(incoming_root: Path, args: argparse.Namespace) -> int:
+    workflow = incoming_root / "workflow.py"
+    if not workflow.is_file():
+        raise WorkflowError(f"incoming package workflow.py is missing: {workflow}")
     command = [
         sys.executable,
         "-B",
-        str(incoming.root / "workflow.py"),
+        str(workflow),
         "update",
         "--source",
-        str(incoming.root),
+        str(incoming_root),
         "--codex-home",
         str(args.codex_home),
         "--project",
@@ -195,6 +284,9 @@ def main() -> int:
     temporary = None
     try:
         runtime, project = _paths(args)
+        if args.command == "check-compatibility":
+            _emit(_require_compatible_codex(), compact=args.json)
+            return 0
         if args.command == "validate":
             package = PackageLayout.resolve(args.package_root)
             _emit(
@@ -207,11 +299,17 @@ def main() -> int:
             )
             return 0
         if args.command == "auto-check-update":
-            config = load_config(
-                runtime.runtime / "workflow_config.json",
-                templates=runtime.runtime / "templates" / "agents",
-            )
-            if not config.auto_check_update:
+            state_path = runtime.runtime / USER_STATE
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise WorkflowError(f"cannot read workflow installation state: {error}") from error
+            if not isinstance(state, dict):
+                raise WorkflowError("workflow installation state must be a JSON object")
+            auto_check_update = state.get("auto_check_update", False)
+            if not isinstance(auto_check_update, bool):
+                raise WorkflowError("install state auto_check_update must be boolean")
+            if not auto_check_update:
                 _emit(
                     {"status": "disabled", "installed": None, "available": None},
                     compact=args.json,
@@ -342,16 +440,20 @@ def main() -> int:
         if args.command == "update":
             assert project is not None
             if args.source:
-                incoming = PackageLayout.resolve(args.source)
+                incoming_root = _package_root(args.source)
             else:
                 selected = select_latest()
                 temporary, package_path = acquire(selected)
-                incoming = PackageLayout.resolve(package_path)
-            if incoming.root != Path(__file__).resolve().parent:
-                return _delegate_update(incoming, args)
-            installed_text = (runtime.runtime / "VERSION").read_text(encoding="utf-8").strip()
-            if parse_semver(incoming.version) < parse_semver(installed_text) and not args.allow_downgrade:
-                raise WorkflowError("incoming version is older; pass --allow-downgrade after approval")
+                incoming_root = _package_root(package_path)
+            _require_newer_update(
+                incoming_root, runtime, allow_downgrade=args.allow_downgrade
+            )
+            if incoming_root != Path(__file__).resolve().parent:
+                # The incoming runtime owns package validation. An installed
+                # launcher may be older than the package it is updating to and
+                # must not reject files removed by that newer package.
+                return _delegate_update(incoming_root, args)
+            incoming = PackageLayout.resolve(incoming_root)
             legacy_local = (
                 args.legacy_local_instructions.read_text(encoding="utf-8")
                 if args.legacy_local_instructions
@@ -366,20 +468,6 @@ def main() -> int:
                 ),
                 args,
             )
-        if args.command == "configure":
-            changes = {
-                "default_executor": args.default_executor,
-                "default_executor_reasoning_effort": args.reasoning_effort,
-                "max_concurrent_workers": args.max_workers,
-                "max_executor_sol_instances": args.max_sol,
-                "report_package_size": args.report_size,
-                "auto_check_update": (
-                    args.auto_check_update == "enabled"
-                    if args.auto_check_update is not None
-                    else None
-                ),
-            }
-            return _finish(plan_configure(runtime, changes), args)
         if args.command == "personalize":
             assert project is not None
             resource = args.resource.read_text(encoding="utf-8")

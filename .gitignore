@@ -2,3 +2,5 @@ dist/
 __pycache__/
 scripts/__pycache__/
 tests/
+AGENTS.md
+workflow_diary.md

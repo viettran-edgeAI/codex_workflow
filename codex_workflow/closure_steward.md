@@ -1,4 +1,4 @@
-# End-of-Session Handoff
+# Closure Steward
 
 Use this automatic closure once after every substantive Medium or Heavy
 deployment, immediately before the main agent's final response. It also applies
@@ -7,8 +7,8 @@ the direct fast path do not use this handoff and produce no worker statistics.
 
 Spawn one fresh worker with:
 
-- `agent_type="end_of_session"`
-- `task_name="end_of_session_<deployment_id>"`, where the suffix is a unique,
+- `agent_type="closure_steward"`
+- `task_name="closure_steward_<deployment_id>"`, where the suffix is a unique,
   lowercase, underscore-safe deployment identifier
 - `fork_turns="200"`
 
@@ -19,11 +19,12 @@ turns so the worker inherits the deployment context while retaining its Luna
 xhigh model; its TOML contains the full procedure.
 
 The worker alone reconciles the complete `agent_docs/` framework, performs
-compact closing checks, handles Git staging and commit, and returns the final
-handoff report and statistics table. Do not call a second documentation worker
-or duplicate these steps. Wait for the worker, then relay its result. Create a
-fresh uniquely named worker for every later substantive deployment in the same
-session.
+compact closing checks, inspects and reports relevant Git status, and returns the
+final handoff report and statistics table. It never stages or commits
+automatically; any commit remains a separate, explicitly authorized user action.
+Do not call a second documentation worker or duplicate these steps. Wait for the
+worker, then relay its result. Create a fresh uniquely named worker for every
+later substantive deployment in the same session.
 
 If the worker cannot be created or is blocked, report that limitation. Do not
-silently transfer the handoff to Explorer or another role.
+silently transfer the handoff to Companion or another role.

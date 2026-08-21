@@ -32,10 +32,6 @@ PROJECT_LOCAL = Marker(
     "<!-- codex-workflow-project-local-instructions-start -->",
     "<!-- codex-workflow-project-local-instructions-end -->",
 )
-EFFECTIVE_CONFIG = Marker(
-    "<!-- codex-workflow-effective-config-start -->",
-    "<!-- codex-workflow-effective-config-end -->",
-)
 def _bounds(text: str, marker: Marker) -> tuple[int, int]:
     if text.count(marker.start) != 1 or text.count(marker.end) != 1:
         raise ValidationError(

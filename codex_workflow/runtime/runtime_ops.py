@@ -1,15 +1,12 @@
-"""User-level runtime and generated-configuration operations."""
+"""User-level runtime and fixed platform-setting operations."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .config import (
-    WorkflowConfig,
-    patch_codex_config,
-    remove_workflow_owned_config,
-    render_heavy_route,
-    render_worker_template,
+from .platform_settings import (
+    patch_codex_settings,
+    remove_workflow_owned_settings,
 )
 from .errors import ValidationError
 from .layout import USER_STATE, WORKER_MARKER, PackageLayout, RuntimePaths
@@ -28,14 +25,12 @@ from .transaction import Mutation
 def plan_runtime_files(
     package: PackageLayout,
     runtime: RuntimePaths,
-    config: WorkflowConfig,
-    config_bytes: bytes,
+    auto_check_update: bool,
 ) -> tuple[list[Mutation], set[str]]:
     mutations: list[Mutation] = []
     owned: set[str] = set()
     excluded = {
         "AGENTS.md",
-        "workflow_config.json",
         "agents",
         "project_docs",
         "templates",
@@ -53,10 +48,7 @@ def plan_runtime_files(
         ):
             continue
         target = runtime.runtime / relative
-        content = source.read_bytes()
-        if relative.as_posix() == "heavy_route.md":
-            content = render_heavy_route(content.decode(), config).encode()
-        mutations.append(Mutation(target, content))
+        mutations.append(Mutation(target, source.read_bytes()))
         owned.add(relative.as_posix())
     template_targets = [(package.project_template, runtime.runtime / "templates" / "AGENTS.md")]
     template_targets.extend(
@@ -70,10 +62,8 @@ def plan_runtime_files(
     for source, target in template_targets:
         mutations.append(Mutation(target, source.read_bytes()))
         owned.add(target.relative_to(runtime.runtime).as_posix())
-    mutations.append(Mutation(runtime.runtime / "workflow_config.json", config_bytes))
-    owned.add("workflow_config.json")
-    mutations.extend(plan_user_agents(package, runtime, config))
-    mutations.extend(plan_materialized_config(runtime, config, package=package))
+    mutations.extend(plan_user_agents(package, runtime, enabled=auto_check_update))
+    mutations.extend(plan_platform_and_workers(runtime, package=package))
     backup = runtime.runtime / ".source_backup" / package.version
     for source in sorted(package.root.rglob("*")):
         if (
@@ -89,9 +79,7 @@ def plan_runtime_files(
     return mutations, owned
 
 
-def _render_user_managed(
-    source: str, instruction: str, config: WorkflowConfig
-) -> str:
+def _render_user_managed(source: str, instruction: str, *, enabled: bool) -> str:
     managed = extract(source, USER_MANAGED)
     if managed.count(AUTO_CHECK_UPDATE_PLACEHOLDER) != 1:
         raise ValidationError(
@@ -99,7 +87,7 @@ def _render_user_managed(
         )
     before, after = managed.split(AUTO_CHECK_UPDATE_PLACEHOLDER)
     sections = [before.strip()]
-    if config.auto_check_update:
+    if enabled:
         sections.append(instruction.strip())
     sections.append(after.strip())
     return "\n\n".join(section for section in sections if section)
@@ -109,11 +97,12 @@ def _plan_user_agents_from_sources(
     source_path: Path,
     instruction_path: Path,
     runtime: RuntimePaths,
-    config: WorkflowConfig,
+    *,
+    enabled: bool,
 ) -> list[Mutation]:
     source = source_path.read_text(encoding="utf-8")
     instruction = instruction_path.read_text(encoding="utf-8")
-    managed = _render_user_managed(source, instruction, config)
+    managed = _render_user_managed(source, instruction, enabled=enabled)
     if runtime.user_agents.is_file():
         current = runtime.user_agents.read_text(encoding="utf-8")
         if USER_MANAGED.start in current or USER_MANAGED.end in current:
@@ -126,39 +115,34 @@ def _plan_user_agents_from_sources(
 
 
 def plan_user_agents(
-    package: PackageLayout, runtime: RuntimePaths, config: WorkflowConfig
+    package: PackageLayout, runtime: RuntimePaths, *, enabled: bool
 ) -> list[Mutation]:
     return _plan_user_agents_from_sources(
         package.root / "user_AGENTS.md",
         package.root / "resources" / "auto_check_update.md",
         runtime,
-        config,
+        enabled=enabled,
     )
 
 
 def plan_installed_user_agents(
-    runtime: RuntimePaths, config: WorkflowConfig
+    runtime: RuntimePaths, *, enabled: bool
 ) -> list[Mutation]:
     return _plan_user_agents_from_sources(
         runtime.runtime / "user_AGENTS.md",
         runtime.runtime / "resources" / "auto_check_update.md",
         runtime,
-        config,
+        enabled=enabled,
     )
 
 
-def plan_materialized_config(
+def plan_platform_and_workers(
     runtime: RuntimePaths,
-    config: WorkflowConfig,
     *,
     package: PackageLayout | None = None,
 ) -> list[Mutation]:
     templates = package.agent_templates if package else runtime.runtime / "templates" / "agents"
-    heavy_source = package.root / "heavy_route.md" if package else runtime.runtime / "heavy_route.md"
-    heavy = render_heavy_route(heavy_source.read_text(encoding="utf-8"), config)
-    mutations = [
-        text_mutation(runtime.runtime / "heavy_route.md", heavy),
-    ]
+    mutations: list[Mutation] = []
     current_state = read_json(runtime.runtime / USER_STATE, default={})
     previous_owned = set(read_string_list(current_state, "owned_workers"))
     workers = {
@@ -166,10 +150,12 @@ def plan_materialized_config(
     }
     for worker in sorted(workers):
         source = templates / f"{worker}.toml"
-        rendered = render_worker_template(
-            source.read_text(encoding="utf-8"), worker=worker, config=config
+        mutations.append(
+            text_mutation(
+                runtime.agents / f"{worker}.toml",
+                source.read_text(encoding="utf-8"),
+            )
         )
-        mutations.append(text_mutation(runtime.agents / f"{worker}.toml", rendered))
     for worker in sorted(previous_owned - workers):
         target = runtime.agents / f"{worker}.toml"
         if target.exists():
@@ -181,7 +167,7 @@ def plan_materialized_config(
         else ""
     )
     mutations.append(
-        text_mutation(runtime.config_toml, patch_codex_config(config_text, config))
+        text_mutation(runtime.config_toml, patch_codex_settings(config_text))
     )
     return mutations
 
@@ -226,7 +212,7 @@ def plan_runtime_remove(
         raise ValidationError(f"Codex config path is not a regular file: {runtime.config_toml}")
     if runtime.config_toml.is_file():
         current = runtime.config_toml.read_text(encoding="utf-8")
-        rendered = remove_workflow_owned_config(current)
+        rendered = remove_workflow_owned_settings(current)
         if rendered != current:
             mutations.append(
                 Mutation(

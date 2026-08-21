@@ -1,12 +1,20 @@
 # Initial Workflow Bootstrap
 
 Use this guide only for the first installation from a universal GitHub Release
-ZIP. Python 3.11 or newer is required. On Windows, use the equivalent
-`py -3.11` invocation and native paths.
+ZIP. Codex 0.147.0 or newer and Python 3.11 or newer are required. On Windows,
+use the equivalent `py -3.11` invocation and native paths.
 
 Verify `codex_workflow-<version>.zip` against `SHA256SUMS`, extract it into a
 temporary directory, and require exactly one top-level `codex_workflow/`
-directory. Validate the package first:
+directory. Verify Codex compatibility before any mutation:
+
+```text
+python3 codex_workflow/workflow.py check-compatibility --json
+```
+
+Stop if that command does not report `"compatible": true`; Codex 0.147.0 is
+the tested minimum release for this workflow's role-specific subagents. Then
+validate the package:
 
 ```text
 python3 codex_workflow/workflow.py validate --package-root codex_workflow --json
@@ -21,7 +29,7 @@ python3 <extracted>/codex_workflow/workflow.py bootstrap \
 ```
 
 The bootstrap installs the shared runtime, templates, source backup, user
-command block, package-default configuration, distributed worker TOMLs, and
+command block, installation state, distributed worker TOMLs, and
 workflow-owned Codex settings. It also initializes the current project's
 workflow entry point, documentation scaffold, personalization and state files,
 and other project-level assets in one compensating transaction.
@@ -31,7 +39,7 @@ and other project-level assets in one compensating transaction.
 Read the command's `agent_actions` result. It always contains one required
 `doc-writer` action for the Project Documentation Framework. Spawn it with
 `agent_type="doc-writer"`, `task_name="bootstrap_docs"`, and
-`fork_turns="none"`. Its capsule must include the project root and the returned
+`fork_turns="none"`. Give it a short installation brief with the project root and returned
 `files`, `created_files`, `recovery_files`, `framework`, and
 `required_context_files` lists, with these requirements:
 

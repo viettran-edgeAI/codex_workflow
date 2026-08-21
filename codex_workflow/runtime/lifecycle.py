@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
 
 from . import RUNTIME_SCHEMA_VERSION
 from .backup import append_backup_mutations
-from .config import WorkflowConfig, load_config, load_migrated_config
 from .errors import ValidationError
 from .layout import USER_STATE, PackageLayout, ProjectPaths, RuntimePaths
 from .personalization import materialize_personalization
@@ -29,7 +28,6 @@ from .project_ops import (
 from .release import parse_semver
 from .runtime_ops import (
     plan_installed_user_agents,
-    plan_materialized_config,
     plan_runtime_files,
     plan_runtime_remove,
 )
@@ -39,10 +37,7 @@ from .transaction import Mutation
 def plan_bootstrap(
     package: PackageLayout, runtime: RuntimePaths, project: ProjectPaths
 ) -> OperationPlan:
-    config = load_config(package.default_config, templates=package.agent_templates)
-    mutations, owned_runtime = plan_runtime_files(
-        package, runtime, config, config.to_json().encode()
-    )
+    mutations, owned_runtime = plan_runtime_files(package, runtime, False)
     project_plan = plan_project_install(package, project)
     mutations.extend(project_plan.mutations)
     state = {
@@ -50,6 +45,7 @@ def plan_bootstrap(
         "version": package.version,
         "owned_runtime_files": sorted(owned_runtime),
         "owned_workers": sorted(package.worker_names),
+        "auto_check_update": False,
     }
     mutations.append(json_mutation(runtime.runtime / USER_STATE, state))
     return OperationPlan(
@@ -62,65 +58,16 @@ def plan_bootstrap(
     )
 
 
-def plan_configure(
-    runtime: RuntimePaths,
-    changes: dict[str, Any],
-) -> OperationPlan:
-    templates = runtime.runtime / "templates" / "agents"
-    current = load_config(runtime.runtime / "workflow_config.json", templates=templates)
-    raw = current.to_mapping()
-    raw.update({key: value for key, value in changes.items() if value is not None})
-    if "enabled_workers" not in changes and changes.get("default_executor"):
-        other = ({"executor_luna", "executor_terra"} - {changes["default_executor"]}).pop()
-        raw["enabled_workers"] = [
-            worker for worker in raw["enabled_workers"] if worker != other
-        ]
-        if changes["default_executor"] not in raw["enabled_workers"]:
-            raw["enabled_workers"].insert(0, changes["default_executor"])
-    available = {path.stem for path in templates.glob("*.toml")}
-    proposed = WorkflowConfig.from_mapping(raw, available_workers=available)
-    mutations = plan_materialized_config(runtime, proposed)
-    if proposed.auto_check_update != current.auto_check_update:
-        mutations.extend(plan_installed_user_agents(runtime, proposed))
-    mutations.append(
-        Mutation(runtime.runtime / "workflow_config.json", proposed.to_json().encode())
-    )
-    state = read_json(runtime.runtime / USER_STATE, default={})
-    state.update(
-        {
-            "schema_version": RUNTIME_SCHEMA_VERSION,
-            "version": (runtime.runtime / "VERSION").read_text(encoding="utf-8").strip(),
-            "owned_workers": sorted(available),
-        }
-    )
-    mutations.append(json_mutation(runtime.runtime / USER_STATE, state))
-    return OperationPlan(
-        "configure",
-        deduplicate(mutations),
-        [],
-        [],
-        {"configuration": proposed.to_mapping()},
-    )
-
-
 def plan_auto_check_update_setting(
     runtime: RuntimePaths, *, enabled: bool
 ) -> OperationPlan:
-    templates = runtime.runtime / "templates" / "agents"
-    current = load_config(runtime.runtime / "workflow_config.json", templates=templates)
-    raw = current.to_mapping()
-    raw["auto_check_update"] = enabled
-    proposed = WorkflowConfig.from_mapping(
-        raw,
-        available_workers={path.stem for path in templates.glob("*.toml")},
-    )
-    mutations = [
-        Mutation(
-            runtime.runtime / "workflow_config.json",
-            proposed.to_json().encode(),
-        )
-    ]
-    mutations.extend(plan_installed_user_agents(runtime, proposed))
+    state_path = runtime.runtime / USER_STATE
+    if not state_path.is_file():
+        raise ValidationError("workflow installation state is missing")
+    state = read_json(state_path, default={})
+    state["auto_check_update"] = enabled
+    mutations = [json_mutation(state_path, state)]
+    mutations.extend(plan_installed_user_agents(runtime, enabled=enabled))
     return OperationPlan(
         "set-auto-check-update",
         mutations,
@@ -163,10 +110,10 @@ def plan_update(
 ) -> OperationPlan:
     installed = PackageLayout.resolve(runtime.runtime, allow_legacy=True)
     project_installed = _project_installed_package(installed, runtime, project)
-    config = load_migrated_config(
-        runtime.runtime / "workflow_config.json",
-        defaults=incoming.default_config,
-        templates=incoming.agent_templates,
+    previous_state = read_json(runtime.runtime / USER_STATE, default={})
+    auto_check_update = _auto_check_update(
+        previous_state,
+        legacy_config=runtime.runtime / "workflow_config.json",
     )
     backup_root = (
         runtime.runtime
@@ -176,7 +123,7 @@ def plan_update(
     mutations: list[Mutation] = []
     append_backup_mutations(mutations, backup_root, runtime, project)
     runtime_mutations, owned_runtime = plan_runtime_files(
-        incoming, runtime, config, config.to_json().encode()
+        incoming, runtime, auto_check_update
     )
     mutations.extend(runtime_mutations)
     project_mutations, warnings = plan_project_update(
@@ -186,7 +133,6 @@ def plan_update(
         legacy_local_instructions=legacy_local_instructions,
     )
     mutations.extend(project_mutations)
-    previous_state = read_json(runtime.runtime / USER_STATE, default={})
     incoming_targets = {
         mutation.path.resolve(strict=False) for mutation in runtime_mutations
     }
@@ -194,11 +140,22 @@ def plan_update(
         obsolete = resolve_owned_runtime_path(runtime.runtime, relative)
         if obsolete not in incoming_targets and obsolete.exists():
             mutations.append(Mutation(obsolete, None))
+    # The legacy configuration was workflow-owned, even for installations
+    # whose older ownership manifest predates its entry.  Retire it after the
+    # preference has been migrated so it cannot become a second source of
+    # truth.
+    legacy_config = runtime.runtime / "workflow_config.json"
+    if (
+        legacy_config.is_file()
+        and legacy_config.resolve(strict=False) not in incoming_targets
+    ):
+        mutations.append(Mutation(legacy_config, None))
     state = {
         "schema_version": RUNTIME_SCHEMA_VERSION,
         "version": incoming.version,
         "owned_runtime_files": sorted(owned_runtime),
         "owned_workers": sorted(incoming.worker_names),
+        "auto_check_update": auto_check_update,
     }
     mutations.append(json_mutation(runtime.runtime / USER_STATE, state))
     return OperationPlan(
@@ -213,6 +170,29 @@ def plan_update(
             "backup": str(backup_root),
         },
     )
+
+
+def _auto_check_update(
+    state: dict[str, object], *, legacy_config: Path | None = None
+) -> bool:
+    """Resolve the update-check preference across the state-file migration.
+
+    Releases that predate the fixed-settings runtime stored this preference in
+    ``workflow_config.json``.  A missing state field therefore means "read the
+    legacy source", not "disable the preference".  Once the new state field is
+    present it remains authoritative, including an explicit ``false`` value.
+    """
+
+    if "auto_check_update" in state:
+        value = state["auto_check_update"]
+    elif legacy_config is not None and legacy_config.is_file():
+        legacy_state = read_json(legacy_config, default={})
+        value = legacy_state.get("auto_check_update", False)
+    else:
+        value = False
+    if not isinstance(value, bool):
+        raise ValidationError("install state auto_check_update must be boolean")
+    return value
 
 
 def _project_installed_package(

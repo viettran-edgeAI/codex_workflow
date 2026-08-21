@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -51,12 +53,15 @@ jobs:
             --output-dir dist
           python scripts/package_release.py \
             --verify dist/codex_workflow-*.zip
+          source_sha="$(git rev-parse HEAD)"
           echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          RELEASE_SHA: ${{ steps.package.outputs.sha }}
           MANUAL_PRERELEASE: ${{ inputs.prerelease }}
         shell: bash
         run: |
@@ -68,5 +73,5 @@ jobs:
             dist/codex_workflow-*.zip \
             dist/SHA256SUMS \
             --title "codex_workflow $RELEASE_TAG" \
-            --target "$GITHUB_SHA" \
+            --target "$RELEASE_SHA" \
             "${release_options[@]}"
