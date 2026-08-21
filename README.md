@@ -74,65 +74,7 @@ The Heavy route uses a circular coordination model: the main agent remains the k
 director at the center, while specialized workers search, implement, verify,
 filter information, and close the deployment around it.
 
-```mermaid
-flowchart LR
-    G["Eligibility gate<br/>Sol or Terra + subagent support"]
-    I["Investigator swarm<br/>independent read-only evidence lanes"]
-    C["Companion<br/>secretary + report wrapper"]
-    M(("Main agent<br/>core context, root cause,<br/>plan and acceptance"))
-    D["default_executor<br/>normal production work"]
-    S["senior_executor<br/>exceptionally difficult work"]
-    T["Tester<br/>independent verification"]
-    W["doc-writer<br/>assigned documentation"]
-    X["Closure Steward<br/>documents + final handoff"]
-
-    G -.->|eligible Heavy session| M
-    M -->|initialize and brief| C
-    M -.->|serious or ambiguous issue:<br/>defines independent search lanes| I
-    M -->|batch scope and boundaries| C
-    I -->|detailed terminal evidence| C
-    I -->|compact terminal receipt| M
-    C -->|filtered director brief| M
-
-    M -->|implementation capsule| D
-    M -.->|senior implementation capsule:<br/>only when difficulty requires it| S
-    M -->|verification capsule<br/>after executor self-check| T
-    T -->|routine production defect packet| D
-    D -->|repair evidence for recheck| T
-    T -->|routine production defect packet<br/>when assigned| S
-    S -->|repair evidence for recheck<br/>when assigned| T
-    D -->|detailed terminal report| C
-    S -->|detailed terminal report| C
-    T -->|detailed verification report| C
-    D -->|compact receipt| M
-    S -->|compact receipt| M
-    T -->|compact receipt| M
-    D -.->|material escalation| M
-    S -.->|material escalation| M
-    T -.->|material escalation| M
-
-    M -->|documentation package<br/>after behavior is verified| W
-    W -->|documentation report| C
-    W -->|compact receipt| M
-
-    M -->|route + deployment ID<br/>+ closure state| X
-    X -->|final report + statistics| M
-
-    classDef gate fill:#2e1065,color:#fff,stroke:#c084fc,stroke-width:2px;
-    classDef center fill:#172554,color:#fff,stroke:#60a5fa,stroke-width:3px;
-    classDef wrapper fill:#ecfeff,stroke:#0891b2,stroke-width:2px;
-    classDef research fill:#f5f3ff,stroke:#7c3aed,stroke-width:2px;
-    classDef execution fill:#eff6ff,stroke:#2563eb,stroke-width:2px;
-    classDef documentation fill:#f0fdf4,stroke:#65a30d,stroke-width:2px;
-    classDef closure fill:#f0fdf4,stroke:#16a34a,stroke-width:2px;
-    class G gate;
-    class M center;
-    class C wrapper;
-    class I research;
-    class D,S,T execution;
-    class W documentation;
-    class X closure;
-```
+![Heavy Route architecture](heavy_route_architecture.png)
 
 | Role or mechanism | Responsibility | Boundary |
 | --- | --- | --- |
