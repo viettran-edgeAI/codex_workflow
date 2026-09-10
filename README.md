@@ -86,6 +86,10 @@ What's special about the system:
 
 ![Light benchmark analysis](light_benchmark/analysis.png)
 
+The current benchmark is an initial case study. See the
+[benchmark coverage proposal](benchmarks/README.md) for ideas on testing more
+tasks and AI providers.
+
 ## 3. More details 
 
 Send these exact commands to Codex from the relevant project directory:
