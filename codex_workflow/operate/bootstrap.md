@@ -24,7 +24,8 @@ Expect the bootstrap to install the shared runtime, templates, source backup,
 user command block, installation state, distributed worker TOMLs, and
 workflow-owned Codex settings and skills. Expect it to initialize the current
 project's workflow entry point, documentation scaffold, personalization and
-state files, and other project-level assets in one compensating transaction.
+state files, register the project for future user-level updates, and create
+other project-level assets in one compensating transaction.
 
 ## Required documentation action
 
@@ -33,10 +34,12 @@ action for the Project Documentation Framework. Spawn it with
 `agent_type="archivist"`, `task_name="bootstrap_docs"`, and
 `fork_turns="none"`. Use Task ID `bootstrap_docs` and the Documentation Context +
 Audience, Documentation Task + Goal, and Main-Agent Documentation Guidance
-capsule. Include the project root and returned
-`files`, `created_files`, `recovery_files`, `framework`, and
+capsule. Include the project root and returned `documentation_root`, `files`,
+`created_files`, `recovery_files`, `framework`, and
 `required_context_files` lists, with these requirements:
 
+- Treat every returned filename as relative to `documentation_root`; do not
+  create those documents at the project root.
 - Inspect only enough project evidence to record verified initial context;
   source-less projects are valid.
 - Initialize only documents listed in `files`—newly created or

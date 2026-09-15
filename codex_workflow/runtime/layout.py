@@ -137,6 +137,7 @@ class PackageLayout:
                 "runtime/plan.py",
                 "runtime/project_ops.py",
                 "runtime/release.py",
+                "runtime/registry.py",
                 "runtime/runtime_ops.py",
                 "runtime/transaction.py",
                 "resources/personalization.md",

@@ -52,10 +52,17 @@ from runtime.lifecycle import (
     materialize_personalization,
     plan_bootstrap,
     plan_enable,
+    plan_install,
     plan_personalize,
     plan_project_install,
     plan_remove,
     plan_update,
+)
+from runtime.registry import (
+    migration_file,
+    normalize_project_roots,
+    read_project_list,
+    read_registered_projects,
 )
 from runtime.markers import (
     PROJECT_LOCAL,
@@ -86,6 +93,12 @@ class MarkerTests(unittest.TestCase):
         self.assertIn("resources/personalization.md", personalization)
         self.assertIn("missing or invalid", personalization)
         self.assertIn("copy that section's complete", personalization)
+
+        update = (PACKAGE / "operate" / "update.md").read_text(encoding="utf-8")
+        self.assertIn("stage-update", update)
+        self.assertIn("returned `guide` path", update)
+        self.assertIn("## Apply this release", update)
+        self.assertIn("Do not scan the filesystem", update)
 
     def test_template_renders_independent_project_regions(self) -> None:
         template = (PACKAGE / "AGENTS.md").read_text(encoding="utf-8")
@@ -357,9 +370,6 @@ class MarkerTests(unittest.TestCase):
                 for path in sorted((PACKAGE / "agents").glob("*.toml"))
             },
             "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
-            "workflow_breakdown.md": (
-                ROOT / "workflow_breakdown.md"
-            ).read_text(encoding="utf-8"),
         }
         retired_architecture_phrases = (
             "wave barrier",
@@ -440,7 +450,7 @@ class MarkerTests(unittest.TestCase):
         self.assertIn("at most 100 words", companion_worker)
         self.assertIn("assignment report at\nmost 220 words", companion_worker)
         self.assertIn("at most 100 words", investigator)
-        self.assertIn("final\nreport at most 120 words", investigator)
+        self.assertIn("final report at most 120 words", investigator)
         self.assertIn("at most 180 words", investigator)
         self.assertIn("at most 80 words", doc_writer)
         self.assertIn("routine reports at most 120 words", doc_writer)
@@ -493,7 +503,8 @@ class MarkerTests(unittest.TestCase):
         self.assertIn("Expect one required", bootstrap)
         self.assertIn("## Installation Documentation", doc_writer)
         self.assertIn("means the workflow installer has just", doc_writer)
-        self.assertIn("the installer's `files`, `created_files`", doc_writer)
+        self.assertIn("the absolute `documentation_root`", doc_writer)
+        self.assertIn("the installer\'s\n`files`, `created_files`", doc_writer)
         self.assertIn("`Task ID`", doc_writer)
         self.assertIn("`agent_docs/project_diary.md`", doc_writer)
         self.assertFalse((PACKAGE / "verification_ledger.py").exists())
@@ -620,6 +631,8 @@ class SafetyTests(unittest.TestCase):
                 resolve_owned_runtime_path(runtime_root, "/tmp/outside.txt")
         with self.assertRaises(ValidationError):
             read_string_list({"owned_runtime_files": None}, "owned_runtime_files")
+        with self.assertRaisesRegex(ValidationError, "must be absolute"):
+            normalize_project_roots(["relative/project"])
 
     def test_backup_skips_missing_optional_user_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1048,6 +1061,10 @@ class LifecycleIntegrationTests(unittest.TestCase):
         action = plan.agent_actions[0]
         self.assertEqual(action["role"], "archivist")
         self.assertTrue(action["required"])
+        self.assertEqual(
+            action["documentation_root"],
+            str((self.project.root / "agent_docs").resolve()),
+        )
         self.assertEqual(set(action["files"]), set(action["framework"]))
         self.assertEqual(
             action["required_context_files"],
@@ -1209,6 +1226,203 @@ class LifecycleIntegrationTests(unittest.TestCase):
         state = json.loads((self.runtime.runtime / "install_state.json").read_text())
         self.assertEqual(set(state["owned_workers"]), self.package.worker_names)
         self.assertEqual(set(state["owned_skills"]), self.package.skill_names)
+        self.assertEqual(state["projects"], [str(self.project_root.resolve())])
+
+    def test_project_install_registers_each_project(self) -> None:
+        self.bootstrap()
+        second_root = self.root / "second-project"
+        second_root.mkdir()
+        second = ProjectPaths(second_root)
+
+        plan_install(self.package, self.runtime, second).apply()
+
+        registered = read_registered_projects(self.runtime)
+        self.assertIsNotNone(registered)
+        self.assertEqual(
+            {project.root for project in registered or []},
+            {self.project_root.resolve(), second_root.resolve()},
+        )
+
+    def test_registry_rejects_empty_project_sets(self) -> None:
+        self.bootstrap()
+        state_path = self.runtime.runtime / "install_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["projects"] = []
+        state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValidationError, "at least one project"):
+            read_registered_projects(self.runtime)
+
+        supplied = migration_file(self.runtime)
+        supplied.write_text("\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValidationError, "at least one absolute path"):
+            read_project_list(supplied)
+
+    def test_one_update_updates_every_registered_project(self) -> None:
+        self.bootstrap()
+        second_root = self.root / "second-project"
+        second_root.mkdir()
+        second = ProjectPaths(second_root)
+        plan_install(self.package, self.runtime, second).apply()
+
+        incoming = self.incoming_package("all-projects-incoming", "1.2.0")
+        template = incoming.project_template.read_text(encoding="utf-8")
+        incoming.project_template.write_text(
+            template.replace("## Working State", "## Working State (all projects)"),
+            encoding="utf-8",
+        )
+        incoming = PackageLayout.resolve(incoming.root)
+        registered = read_registered_projects(self.runtime)
+        assert registered is not None
+
+        plan = plan_update(incoming, self.runtime, registered)
+        plan.apply()
+
+        self.assertEqual(
+            set(plan.details["projects"]),
+            {str(self.project_root.resolve()), str(second_root.resolve())},
+        )
+        for project in (self.project, second):
+            self.assertIn(
+                "## Working State (all projects)",
+                project.active.read_text(encoding="utf-8"),
+            )
+            state = json.loads(project.state.read_text(encoding="utf-8"))
+            self.assertEqual(state["workflow_version"], "1.2.0")
+
+    def test_registry_migration_requires_user_project_paths(self) -> None:
+        self.bootstrap()
+        state_path = self.runtime.runtime / "install_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.pop("projects")
+        state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+        incoming = self.incoming_package(
+            "registry-input-incoming", NEXT_PACKAGE_VERSION
+        )
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(incoming.root / "runtime" / "workflow.py"),
+                "update",
+                "--source",
+                str(incoming.root),
+                "--codex-home",
+                str(self.codex_home),
+                "--project",
+                str(self.project_root),
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["input_required"])
+        self.assertTrue(result["requires_fresh_user_reply"])
+        self.assertIn("Stop this turn", result["agent_instruction"])
+        self.assertIn("Do not infer", result["agent_instruction"])
+        self.assertIn("every project", result["prompt"])
+        self.assertEqual(result["input_file"], str(migration_file(self.runtime)))
+
+    def test_registry_migration_updates_supplied_projects_and_removes_input(self) -> None:
+        self.bootstrap()
+        second_root = self.root / "second-project"
+        second_root.mkdir()
+        second = ProjectPaths(second_root)
+        plan_project_install(self.package, second).apply()
+        state_path = self.runtime.runtime / "install_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.pop("projects")
+        state_path.write_text(json.dumps(state) + "\n", encoding="utf-8")
+        supplied = migration_file(self.runtime)
+        supplied.write_text(
+            f"{self.project_root.resolve()}\n{second_root.resolve()}\n",
+            encoding="utf-8",
+        )
+        incoming = self.incoming_package(
+            "registry-migration-incoming", NEXT_PACKAGE_VERSION
+        )
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(incoming.root / "runtime" / "workflow.py"),
+                "update",
+                "--source",
+                str(incoming.root),
+                "--codex-home",
+                str(self.codex_home),
+                "--project",
+                str(self.project_root),
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertFalse(supplied.exists())
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            set(result["details"]["projects"]),
+            {str(self.project_root.resolve()), str(second_root.resolve())},
+        )
+
+    def test_stage_update_persists_verified_package_and_returns_guide(self) -> None:
+        self.bootstrap()
+        download = tempfile.TemporaryDirectory()
+        downloaded_package = Path(download.name) / "codex_workflow"
+        shutil.copytree(
+            PACKAGE,
+            downloaded_package,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        selection = ReleaseSelection(
+            NEXT_PACKAGE_VERSION,
+            parse_semver(NEXT_PACKAGE_VERSION),
+            f"codex_workflow-{NEXT_PACKAGE_VERSION}.zip",
+            "https://example.invalid/workflow.zip",
+            "https://example.invalid/SHA256SUMS",
+        )
+
+        with mock.patch.object(
+            workflow_cli, "acquire", return_value=(download, downloaded_package)
+        ):
+            staged, guide = workflow_cli._stage_update(selection, self.runtime)
+
+        self.assertTrue(staged.is_dir())
+        self.assertEqual(guide, staged / "operate" / "update.md")
+        self.assertTrue(guide.is_file())
+        self.assertFalse(Path(download.name).exists())
+
+    def test_multi_project_update_rejects_unknown_target_before_writes(self) -> None:
+        self.bootstrap()
+        unknown_root = self.root / "unknown-project"
+        unknown_root.mkdir()
+        incoming = self.incoming_package("unknown-project-incoming", "1.2.0")
+        installed_version = (
+            self.runtime.runtime / "operate" / "VERSION"
+        ).read_text(encoding="utf-8")
+
+        with self.assertRaisesRegex(ValidationError, "registered project"):
+            plan_update(
+                incoming,
+                self.runtime,
+                [self.project, ProjectPaths(unknown_root)],
+            )
+
+        self.assertEqual(
+            (self.runtime.runtime / "operate" / "VERSION").read_text(
+                encoding="utf-8"
+            ),
+            installed_version,
+        )
 
     def test_personalize_and_enable_disable_preserve_regions(self) -> None:
         self.bootstrap(existing_agents="Local policy.\n")

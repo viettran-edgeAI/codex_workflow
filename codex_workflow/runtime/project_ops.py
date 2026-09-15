@@ -287,6 +287,7 @@ def plan_project_install(package: PackageLayout, project: ProjectPaths) -> Opera
             "role": "archivist",
             "action": "initialize or verify the Project Documentation Framework",
             "required": True,
+            "documentation_root": str(project.docs.resolve()),
             "files": action_docs,
             "created_files": created_docs,
             "recovery_files": recovery_docs,

@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 if sys.version_info < (3, 11):
@@ -23,7 +25,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from runtime.errors import WorkflowError
+from runtime.errors import InputRequiredError, WorkflowError
 from runtime.layout import PROJECT_ID
 from runtime.lifecycle import (
     OperationPlan,
@@ -32,14 +34,20 @@ from runtime.lifecycle import (
     RuntimePaths,
     plan_bootstrap,
     plan_enable,
+    plan_install,
     plan_personalize,
-    plan_project_install,
     plan_remove,
     plan_update,
+)
+from runtime.registry import (
+    migration_file,
+    read_project_list,
+    read_registered_projects,
 )
 from runtime.release import (
     acquire,
     parse_semver,
+    ReleaseSelection,
     select_latest,
     select_releases,
     summarize_release_notes,
@@ -81,10 +89,18 @@ def parse_args() -> argparse.Namespace:
     update.add_argument("--source", type=Path, help=argparse.SUPPRESS)
     update.add_argument("--allow-downgrade", action="store_true")
     update.add_argument(
+        "--projects-file",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
+    update.add_argument(
         "--legacy-local-instructions",
         type=Path,
         help="reviewed local instructions extracted from a legacy merged entry point",
     )
+
+    stage_update = commands.add_parser("stage-update", help=argparse.SUPPRESS)
+    _add_common(stage_update, project=False)
 
     remove = commands.add_parser("remove")
     _add_common(remove)
@@ -216,12 +232,89 @@ def _delegate_update(incoming_root: Path, args: argparse.Namespace) -> int:
         command.extend(
             ["--legacy-local-instructions", str(args.legacy_local_instructions)]
         )
+    if args.projects_file:
+        command.extend(["--projects-file", str(args.projects_file)])
     if args.apply:
         command.append("--apply")
     if args.json:
         command.append("--json")
     completed = subprocess.run(command, check=False)
     return completed.returncode
+
+
+def _stage_update(
+    selection: ReleaseSelection, runtime: RuntimePaths
+) -> tuple[Path, Path]:
+    """Persist a verified incoming package so its guide can be read first."""
+
+    incoming_root = runtime.runtime / ".incoming"
+    if incoming_root.is_symlink() or (
+        incoming_root.exists() and not incoming_root.is_dir()
+    ):
+        raise WorkflowError(f"incoming update path is not a directory: {incoming_root}")
+    incoming_root.mkdir(parents=True, exist_ok=True)
+    for previous in incoming_root.iterdir():
+        if previous.is_symlink():
+            raise WorkflowError(f"refusing to remove symlinked staged update: {previous}")
+        if previous.is_dir():
+            shutil.rmtree(previous)
+        elif previous.is_file():
+            previous.unlink()
+        else:
+            raise WorkflowError(f"invalid staged update entry: {previous}")
+
+    temporary, package = acquire(selection)
+    try:
+        staged_parent = Path(
+            tempfile.mkdtemp(prefix="release-", dir=incoming_root)
+        )
+        staged = staged_parent / "codex_workflow"
+        shutil.copytree(package, staged)
+    finally:
+        temporary.cleanup()
+    guide = staged / "operate" / "update.md"
+    if not guide.is_file():
+        shutil.rmtree(staged_parent)
+        raise WorkflowError("incoming release has no operate/update.md handoff guide")
+    return staged, guide
+
+
+def _update_projects(
+    runtime: RuntimePaths,
+    current: ProjectPaths,
+    projects_file: Path | None,
+) -> tuple[list[ProjectPaths], Path | None]:
+    """Resolve all update targets or request the one-time legacy project list."""
+
+    registered = read_registered_projects(runtime)
+    automatic = migration_file(runtime)
+    selected_file = projects_file.expanduser().resolve() if projects_file else None
+    cleanup: Path | None = None
+    if selected_file is not None:
+        projects = read_project_list(selected_file)
+    elif registered is not None:
+        projects = registered
+    elif automatic.is_file():
+        projects = read_project_list(automatic)
+        cleanup = automatic
+    else:
+        raise InputRequiredError(
+            (
+                "this installation predates the project registry; a fresh user "
+                "reply is required before any project list may be written"
+            ),
+            prompt=(
+                "Please provide the absolute root path of every project where "
+                "codex_workflow is installed, including disabled projects."
+            ),
+            input_file=str(automatic),
+        )
+
+    current_entry = _project_workflow_entry(current)
+    known = {project.root.resolve() for project in projects}
+    if current_entry is not None and current.root.resolve() not in known:
+        projects.append(ProjectPaths(current.root.resolve()))
+    return projects, cleanup
 
 
 def main() -> int:
@@ -280,6 +373,23 @@ def main() -> int:
                 compact=args.json,
             )
             return 0
+        if args.command == "stage-update":
+            selected = select_latest()
+            installed_text = _version_path(runtime.runtime).read_text(encoding="utf-8").strip()
+            if selected.version <= parse_semver(installed_text):
+                raise WorkflowError("no newer release is available to stage")
+            staged, guide = _stage_update(selected, runtime)
+            _emit(
+                {
+                    "applied": False,
+                    "status": "staged",
+                    "version": selected.version_text,
+                    "package": str(staged),
+                    "guide": str(guide),
+                },
+                compact=args.json,
+            )
+            return 0
         if args.command == "remove":
             assert project is not None
             plan = plan_remove(runtime, project)
@@ -298,7 +408,8 @@ def main() -> int:
             assert project is not None
             if project.active.exists() and project.disabled.exists():
                 raise WorkflowError("both active and disabled project entry points exist")
-            if _has_package_version(runtime.runtime):
+            runtime_installed = _has_package_version(runtime.runtime)
+            if runtime_installed:
                 package = PackageLayout.resolve(runtime.runtime)
             elif args.package_root is not None:
                 package = PackageLayout.resolve(args.package_root)
@@ -313,7 +424,9 @@ def main() -> int:
                 # turns stale, malformed, or personalization-drifted installs
                 # into actionable errors instead of misreporting them as merely
                 # disabled.
-                existing_plan = plan_project_install(package, project)
+                existing_plan = plan_install(
+                    package, runtime, project, register=runtime_installed
+                )
                 documentation_action_required = any(
                     action.get("files") for action in existing_plan.agent_actions
                 )
@@ -337,7 +450,10 @@ def main() -> int:
                     compact=args.json,
                 )
                 return 0
-            return _finish(plan_project_install(package, project), args)
+            return _finish(
+                plan_install(package, runtime, project, register=runtime_installed),
+                args,
+            )
         if args.command == "update":
             assert project is not None
             if args.source:
@@ -360,12 +476,17 @@ def main() -> int:
                 if args.legacy_local_instructions
                 else None
             )
+            update_projects, project_list_cleanup = _update_projects(
+                runtime, project, args.projects_file
+            )
             return _finish(
                 plan_update(
                     incoming,
                     runtime,
-                    project,
+                    update_projects,
                     legacy_local_instructions=legacy_local,
+                    legacy_project=project,
+                    project_list_cleanup=project_list_cleanup,
                 ),
                 args,
             )
@@ -377,6 +498,26 @@ def main() -> int:
             assert project is not None
             return _finish(plan_enable(project, enable=args.command == "enable"), args)
         raise WorkflowError(f"unsupported command: {args.command}")
+    except InputRequiredError as error:
+        _emit(
+            {
+                "error": str(error),
+                "applied": False,
+                "input_required": True,
+                "requires_fresh_user_reply": True,
+                "agent_instruction": (
+                    "Stop this turn and ask the user the returned prompt. Do not "
+                    "infer, discover, confirm, or write the project list yourself, "
+                    "even if paths appear to be known from context. Resume only "
+                    "after the user replies in a later turn."
+                ),
+                "prompt": error.prompt,
+                "input_file": error.input_file,
+                "input_format": "one absolute project root per line",
+            },
+            compact=getattr(args, "json", False),
+        )
+        return 1
     except (OSError, WorkflowError) as error:
         _emit({"error": str(error), "applied": False}, compact=getattr(args, "json", False))
         return 1

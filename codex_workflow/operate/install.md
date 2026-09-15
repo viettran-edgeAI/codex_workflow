@@ -51,6 +51,10 @@ command adds its marked workflow-owned block. That block ignores only the
 generated `AGENTS.md` wrapper and `.codex_workflow_hidden_resources/`; it must
 not ignore `agent_docs/`.
 
+The command also registers the canonical project root in the user-level
+installation state so one future `codex_workflow --update` can update every
+installed project.
+
 Keep the shared user-level runtime, fixed definitions, user instructions,
 source backup, and worker TOMLs under `~/.codex/` unchanged. Stop and report the
 error if the initial user-level bootstrap is missing.
@@ -63,15 +67,17 @@ disabled` no-op. Spawn the returned action with
 `agent_type="archivist"`, `task_name="install_docs"`, and
 `fork_turns="none"`. Use Task ID `install_docs` and the Documentation Context +
 Audience, Documentation Task + Goal, and Main-Agent Documentation Guidance
-capsule. Pass the project root and returned `files`, `created_files`,
-`recovery_files`, `framework`, and `required_context_files` lists. Initialize
-only documents in `files`: these are newly created or still-template-marked
-recovery documents. Remove their bootstrap markers and preserve every other
-existing document. Populate listed `project_structure.md`, `project_overview.md`,
-and `project_core_tech.md` files with verified project evidence. If `files` is
-empty, perform only a read-only framework completeness check. An empty project
-is valid; explicitly record that project context was unavailable and leave
-deployment status empty when no plan exists.
+capsule. Pass the project root and returned `documentation_root`, `files`,
+`created_files`, `recovery_files`, `framework`, and `required_context_files`
+lists. Initialize
+only documents in `files` under `documentation_root`: these are newly created
+or still-template-marked recovery documents. Remove their bootstrap markers
+and preserve every other existing document. Populate listed
+`project_structure.md`, `project_overview.md`, and `project_core_tech.md` files
+with verified project evidence. If `files` is empty, perform only a read-only
+framework completeness check. An empty project is valid; explicitly record
+that project context was unavailable and leave deployment status empty when no
+plan exists.
 
 Treat installation as incomplete if the required worker cannot run or fails.
 Do not silently perform its work in the main thread.

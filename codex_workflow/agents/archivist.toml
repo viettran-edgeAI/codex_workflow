@@ -36,10 +36,13 @@ other workers or decide project acceptance.
 
 An installation-documentation assignment means the workflow installer has just
 created or repaired the project's `agent_docs/` framework. The assignment gives
-you the project root and the installer's `files`, `created_files`,
-`recovery_files`, `framework`, and `required_context_files` lists.
+you the project root, the absolute `documentation_root`, and the installer's
+`files`, `created_files`, `recovery_files`, `framework`, and
+`required_context_files` lists.
 
-Your task in that assignment is to initialize only the documents in `files`.
+Your task in that assignment is to initialize only the documents in `files`
+under `documentation_root`. Treat every listed filename as relative to that
+directory; do not create those documents at the project root.
 They are new or still contain the `codex-workflow-bootstrap-template` marker.
 Inspect only enough project evidence to record verified initial context, remove
 the marker from each listed file, and preserve every document not in `files`.

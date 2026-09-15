@@ -21,7 +21,7 @@ For exact behavior, use the source that owns the relevant contract:
 - `codex_workflow/skills/deployment-token-report/` for deployment usage
   reporting.
 
-This revision was reviewed against packaged version `1.1.17`, read from
+This revision was reviewed against packaged version `1.1.18`, read from
 `codex_workflow/operate/VERSION`. Version markers, package validation, and
 release tests prevent that value from drifting from the distributed user
 instruction block.
@@ -285,17 +285,20 @@ The user state file records:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "version": "<installed-version>",
   "owned_runtime_files": ["<relative paths>"],
   "owned_workers": ["<worker names>"],
-  "owned_skills": ["<skill names>"]
+  "owned_skills": ["<skill names>"],
+  "projects": ["<canonical absolute project roots>"]
 }
 ```
 
 Ownership lists permit later update and removal to distinguish workflow files
 from unrelated user assets. Runtime-relative paths and skill names are
-validated before they can identify deletion targets.
+validated before they can identify deletion targets. The project registry lets
+one update validate and update every installed project without scanning the
+filesystem.
 
 ### 2.2 Project installation
 
@@ -334,7 +337,7 @@ the marked region of `~/.codex/AGENTS.md`.
 | `codex_workflow --install` | Current project | Uses the existing user-level runtime, imports unrecognized local instructions, creates missing project assets, repairs recognized safe omissions, and requires documentation initialization or recovery when needed |
 | `codex_workflow --personal` | Current project | Interactively validates and atomically applies all three personalization sections |
 | `codex_workflow --check-update` | User runtime, read-only | Reports every newer installable release with compact release-note summaries; downloads and changes nothing |
-| `codex_workflow --update` | User runtime + current project | Acquires the newest eligible release, verifies it, backs up owned state, replaces fixed definitions, migrates supported historical layouts, and preserves project-owned content |
+| `codex_workflow --update` | User runtime + all registered projects | Stages and verifies the newest eligible release, hands control to its update guide, backs up owned state, and updates every registered project in one transaction |
 | `codex_workflow --disable` | Current project | Atomically moves the recognized active entry point into hidden resources and updates state |
 | `codex_workflow --enable` | Current project | Atomically moves the recognized hidden entry point back to project root and updates state |
 | `codex_workflow --remove` | User runtime + current project | Produces a read-only destructive plan, requires one explicit confirmation, then removes only recognized workflow-owned surfaces while restoring local instructions |
@@ -368,9 +371,10 @@ or a recognized entry using an older or locally modified managed template.
 
 Update selects the highest non-draft semantic release containing both
 `codex_workflow-<version>.zip` and `SHA256SUMS`. Prereleases remain eligible. It
-verifies the checksum and archive structure, then delegates application to the
-incoming release's runtime. This lets a newer schema validate itself instead of
-being rejected by an older installed launcher.
+verifies the checksum and archive structure and stages the release. The agent
+then reads the incoming package's `operate/update.md` before running its
+runtime. This lets each release define its own migrations and validate its own
+schema instead of depending on an older installed guide or launcher.
 
 The update plan:
 
@@ -379,12 +383,17 @@ The update plan:
 - replaces route, worker, skill, template, guide, and runtime definitions;
 - updates the user command region and owned Codex settings;
 - preserves unrelated user settings, workers, skills, and instruction content;
-- validates each project against its recorded version's source backup;
+- validates every registered project against its recorded version's source backup;
 - preserves personalization, project-local instructions, project documentation,
   and enabled/disabled state;
 - removes obsolete manifest-owned runtime files, workers, and skills after
   validating their ownership markers; and
 - rejects equal versions and unapproved downgrades.
+
+Bootstrap and project install record canonical project roots in the user-level
+registry. The first registry-aware update from an older installation asks the
+user for the complete project list and never searches the filesystem. Once the
+registry exists, later updates require no project selection.
 
 A historical entry containing merged local edits requires explicit reviewed
 local instructions for one-time migration. The runtime does not infer them.
