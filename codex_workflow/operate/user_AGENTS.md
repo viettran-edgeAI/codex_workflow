@@ -46,7 +46,8 @@ or still marked as templates.
 
 Keep raw logs, temporary reasoning, and short-lived checkpoints out of durable
 documents; give each fact one canonical home. Never delete a main project
-document without warning and a second explicit confirmation.
+document without warning. If the user has not explicitly requested or
+authorized that deletion, obtain confirmation before deleting it.
 
 ## Route Selection
 
@@ -83,14 +84,16 @@ Investigator lanes together and compare all three reports before deciding.
 
 ## Required Documentation Read
 
-If session-level intake is not complete, directly read the complete current
-`agent_docs/` framework exactly once: overview, core technology, structure,
-progress, diary, latest session work, and every module-specific Markdown
-document. This one direct read is shared across Medium and Heavy. Never repeat
-it later in the session. Use retained context or assign two Explorers a bounded
-context delta, module intake, or conflict check when detail or freshness
-matters. Missing or unreadable required documents leave deployment entry
-incomplete; report the intake blocker.
+When entering a substantive Medium or Heavy deployment, if session-level
+intake is not complete, directly read the complete current `agent_docs/`
+framework exactly once: overview, core technology, structure, progress,
+diary, latest session work, and every module-specific Markdown document.
+This one direct read is shared across Medium and Heavy. Never repeat it later
+in the session. Use retained context or assign two Explorers a bounded context
+delta, module intake, or conflict check when detail or freshness matters.
+Missing or unreadable required documents leave deployment entry incomplete;
+report the intake blocker. In Light, read only the project documents needed
+for the current task.
 
 ## Platform Paths
 
