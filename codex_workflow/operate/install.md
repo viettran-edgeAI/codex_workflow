@@ -57,14 +57,12 @@ only documents in `files`: these are newly created or still-template-marked
 recovery documents. Remove their bootstrap markers and preserve every other
 existing document. Populate listed `project_structure.md`, `project_overview.md`,
 and `project_core_tech.md` files with verified project evidence. If the project
-is empty, pause before spawning Archivist and ask the user to provide either a
-concise project overview in the conversation or a path to an overview document.
-If the user provides a path, read that document as the initial project-context
-source and include the path and its verified contents in Archivist's capsule;
-do not scan unrelated files or invent missing context. Treat installation as
-incomplete and report the blocker if the user provides neither form of
-overview. If `files` is empty, perform only a read-only framework completeness
-check.
+is empty, proceed with the returned documentation action. If the user has
+already supplied a project overview or a path to one, include that verified
+context in Archivist's capsule. Otherwise tell Archivist that no source or
+overview is available; record unavailable context in the new documents rather
+than inventing facts. If `files` is empty, perform only a read-only framework
+completeness check.
 For this installation action only, Archivist may initialize listed new or
 recovery `project_progress.md`, `project_diary.md`, and
 `latest_session_work.md` files; later deployment updates belong to the main.
